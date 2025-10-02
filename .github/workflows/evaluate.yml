@@ -1,0 +1,175 @@
+name: Watsonx Orchestrate Evaluation
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      test_paths:
+        description: 'Comma-separated test paths'
+        required: false
+        default: 'tests/evaluation_data/'
+      config_file:
+        description: 'Path to config file (optional)'
+        required: false
+  schedule:
+    # Run evaluations daily at 2 AM UTC
+    - cron: '0 2 * * *'
+
+env:
+  WXO_VERSION: "1.12.0"
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install Watsonx Orchestrate CLI
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # Verify installation
+          orchestrate --version
+      
+      - name: Configure WxO Environment
+        env:
+          WXO_API_URL: ${{ secrets.WXO_API_URL }}
+          WXO_API_KEY: ${{ secrets.WXO_API_KEY }}
+          WXO_TENANT_NAME: ${{ secrets.WXO_TENANT_NAME }}
+        run: |
+          # Add environment configuration
+          orchestrate env add \
+            --name $WXO_TENANT_NAME \
+            --url $WXO_API_URL \
+            --api-key $WXO_API_KEY
+          
+          # Activate the environment
+          orchestrate env activate $WXO_TENANT_NAME
+      
+      - name: Import Agents and Tools
+        run: |
+          # Import all agents from the agents directory
+          if [ -d "agents" ]; then
+            for agent_file in agents/*.yaml; do
+              echo "Importing agent: $agent_file"
+              orchestrate agents import --file "$agent_file"
+            done
+          fi
+          
+          # Import all tools from the tools directory
+          if [ -d "tools" ]; then
+            for tool_file in tools/*.yaml; do
+              echo "Importing tool: $tool_file"
+              orchestrate tools import --file "$tool_file"
+            done
+          fi
+      
+      - name: Run Evaluation
+        id: evaluation
+        env:
+          TEST_PATHS: ${{ github.event.inputs.test_paths || 'tests/evaluation_data/' }}
+          CONFIG_FILE: ${{ github.event.inputs.config_file }}
+        run: |
+          # Create output directory with timestamp
+          OUTPUT_DIR="results/$(date +%Y%m%d_%H%M%S)"
+          mkdir -p "$OUTPUT_DIR"
+          
+          # Run evaluation based on config file or parameters
+          if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
+            echo "Running evaluation with config file: $CONFIG_FILE"
+            orchestrate evaluations evaluate --config-file "$CONFIG_FILE"
+          else
+            echo "Running evaluation with test paths: $TEST_PATHS"
+            orchestrate evaluations evaluate \
+              --test-paths "$TEST_PATHS" \
+              --output-dir "$OUTPUT_DIR" \
+              --enable-verbose-logging
+          fi
+          
+          # Save output directory for later steps
+          echo "output_dir=$OUTPUT_DIR" >> $GITHUB_OUTPUT
+      
+      - name: Parse and Display Results
+        if: always()
+        run: |
+          OUTPUT_DIR="${{ steps.evaluation.outputs.output_dir }}"
+          
+          if [ -f "$OUTPUT_DIR/summary_metrics.csv" ]; then
+            echo "## Evaluation Summary" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat "$OUTPUT_DIR/summary_metrics.csv" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+      
+      - name: Upload Evaluation Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evaluation-results-${{ github.run_number }}
+          path: |
+            results/
+            !results/**/*.pyc
+          retention-days: 30
+      
+      - name: Check Evaluation Thresholds
+        if: always()
+        run: |
+          OUTPUT_DIR="${{ steps.evaluation.outputs.output_dir }}"
+          
+          # Parse metrics and check thresholds
+          python scripts/check_thresholds.py \
+            --metrics-file "$OUTPUT_DIR/summary_metrics.csv" \
+            --config-file evaluation_thresholds.yaml
+      
+      - name: Comment PR with Results
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const outputDir = '${{ steps.evaluation.outputs.output_dir }}';
+            const summaryPath = `${outputDir}/summary_metrics.csv`;
+            
+            if (fs.existsSync(summaryPath)) {
+              const summary = fs.readFileSync(summaryPath, 'utf8');
+              
+              const comment = `## Watsonx Orchestrate Evaluation Results
+              
+              **Run:** ${context.runNumber}
+              **Commit:** ${context.sha.substring(0, 7)}
+              
+              ### Summary Metrics
+              \`\`\`
+              ${summary}
+              \`\`\`
+              
+              [View detailed results](${context.payload.repository.html_url}/actions/runs/${context.runId})
+              `;
+              
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: comment
+              });
+            }
+      
+      - name: Notify on Failure
+        if: failure()
+        run: |
+          echo "Evaluation failed. Check the logs for details."
+          exit 1
