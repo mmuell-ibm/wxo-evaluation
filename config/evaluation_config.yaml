@@ -1,0 +1,74 @@
+# config/evaluation_config.yaml
+# Complete evaluation configuration for Watsonx Orchestrate
+
+# Test data locations
+test_paths:
+  - tests/evaluation_data/customer_service/
+  - tests/evaluation_data/sales_flow/
+  - tests/evaluation_data/knowledge_base/
+
+# Authentication configuration
+# Values are substituted from environment variables in CI/CD
+auth_config:
+  url: ${WXO_API_URL}
+  tenant_name: ${WXO_TENANT_NAME}
+
+# Output directory for results
+output_dir: "results/latest"
+
+# Enable detailed logging
+enable_verbose_logging: true
+
+# LLM user configuration
+llm_user_config:
+  user_response_style:
+    - "Be concise in messages and confirmations"
+    - "Provide clear and specific information"
+    - "Use professional language"
+  
+  # Optional: Configure user behavior simulation
+  user_behavior:
+    confirmation_style: "quick"  # quick, detailed, or minimal
+    follow_up_questions: true
+    error_handling: "polite"
+
+# Watsonx Orchestrate version
+wxo_lite_version: 1.12.0
+
+agent_config:
+  timeout_seconds: 300
+  max_retries: 3
+  retry_delay_seconds: 2
+
+# Optional: Evaluation parameters
+evaluation_params:
+  # Skip certain checks if needed
+  skip_checks:
+    # - tool_call_precision
+    # - agent_routing_accuracy
+  
+  # Custom thresholds for this specific evaluation
+  custom_thresholds:
+    tool_call_precision: 0.90
+    journey_success_rate: 0.95
+  
+  # Parallel execution settings
+  parallel_execution:
+    enabled: false
+    max_workers: 4
+
+# Optional: Knowledge base specific settings
+knowledge_base_config:
+  confidence_threshold: 0.7
+  max_results: 5
+  include_metadata: true
+
+# Optional: Reporting configuration
+reporting:
+  generate_html_report: true
+  include_conversation_logs: true
+  anonymize_pii: true
+  export_formats:
+    - csv
+    - json
+    - html
